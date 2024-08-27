@@ -54,39 +54,33 @@ class AppSettings:
         "api_key": os.environ.get("AZURE_SPEECH_API_KEY", "e2123c096f1b434aa8b2974fdf3cc06c"),
         "region": os.environ.get("AZURE_SPEECH_REGION", "westeurope")
     }
+@bp.route("/audio", methods=["POST"])
+async def speech_to_text():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
 
-    async def conversation_internal(request_body, request_headers):
-    try:
-        # Check for audio in the request
-        if 'audio' in request_body:
-            audio_data = request_body['audio']
-            # Handle audio transcription
-            transcribed_text = await transcribe_audio(audio_data)
-            request_body['messages'].append({
-                "role": "user",
-                "content": transcribed_text
-            })
-    
-        if app_settings.azure_openai.stream and not app_settings.base_settings.use_promptflow:
-            result = await stream_chat_request(request_body, request_headers)
-            response = await make_response(format_as_ndjson(result))
-            response.timeout = None
-            response.mimetype = "application/json-lines"
-            return response
-        else:
-            result = await complete_chat_request(request_body, request_headers)
-            return jsonify(result)
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
 
-    except Exception as ex:
-        logging.exception(ex)
-        if hasattr(ex, "status_code"):
-            return jsonify({"error": str(ex)}), ex.status_code
-        else:
-            return jsonify({"error": str(ex)}), 500
+    if file:
+        file_path = f"/tmp/{uuid.uuid4().hex}.wav"
+        async with aiofiles.open(file_path, 'wb') as f:
+            await f.write(file.read())
 
-    async def transcribe_audio(audio_data):
+        try:
+            # Transcribe the audio file
+            transcribed_text = await transcribe_audio(file_path)
+            os.remove(file_path)  # Clean up the file
+            return jsonify({"text": transcribed_text}), 200
+        except Exception as e:
+            os.remove(file_path)  # Clean up the file in case of an error
+            logging.exception("Failed to transcribe audio")
+            return jsonify({"error": str(e)}), 500
+
+    async def transcribe_audio(file_path):
     speech_config = speechsdk.SpeechConfig(subscription=app_settings.azure_speech["api_key"], region=app_settings.azure_speech["region"])
-    audio_input = speechsdk.AudioConfig(stream=speechsdk.AudioDataStream(audio_data))
+    audio_input = speechsdk.AudioConfig(filename=file_path)
     speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_input)
     
     result = await asyncio.get_event_loop().run_in_executor(None, lambda: speech_recognizer.recognize_once())
@@ -96,6 +90,7 @@ class AppSettings:
     else:
         raise Exception(f"Speech Recognition failed: {result.reason}")
 
+    
     @app.before_serving
     async def init():
         try:
