@@ -35,6 +35,8 @@ from backend.utils import (
     convert_to_pf_format,
     format_pf_non_streaming_response,
 )
+import azure.cognitiveservices.speech as speechsdk
+import aiofiles
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -45,7 +47,55 @@ def create_app():
     app = Quart(__name__)
     app.register_blueprint(bp)
     app.config["TEMPLATES_AUTO_RELOAD"] = True
+
+# Add to your settings
+class AppSettings:
+    azure_speech = {
+        "api_key": os.environ.get("AZURE_SPEECH_API_KEY", "e2123c096f1b434aa8b2974fdf3cc06c"),
+        "region": os.environ.get("AZURE_SPEECH_REGION", "westeurope")
+    }
+
+    async def conversation_internal(request_body, request_headers):
+    try:
+        # Check for audio in the request
+        if 'audio' in request_body:
+            audio_data = request_body['audio']
+            # Handle audio transcription
+            transcribed_text = await transcribe_audio(audio_data)
+            request_body['messages'].append({
+                "role": "user",
+                "content": transcribed_text
+            })
     
+        if app_settings.azure_openai.stream and not app_settings.base_settings.use_promptflow:
+            result = await stream_chat_request(request_body, request_headers)
+            response = await make_response(format_as_ndjson(result))
+            response.timeout = None
+            response.mimetype = "application/json-lines"
+            return response
+        else:
+            result = await complete_chat_request(request_body, request_headers)
+            return jsonify(result)
+
+    except Exception as ex:
+        logging.exception(ex)
+        if hasattr(ex, "status_code"):
+            return jsonify({"error": str(ex)}), ex.status_code
+        else:
+            return jsonify({"error": str(ex)}), 500
+
+    async def transcribe_audio(audio_data):
+    speech_config = speechsdk.SpeechConfig(subscription=app_settings.azure_speech["api_key"], region=app_settings.azure_speech["region"])
+    audio_input = speechsdk.AudioConfig(stream=speechsdk.AudioDataStream(audio_data))
+    speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_input)
+    
+    result = await asyncio.get_event_loop().run_in_executor(None, lambda: speech_recognizer.recognize_once())
+
+    if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+        return result.text
+    else:
+        raise Exception(f"Speech Recognition failed: {result.reason}")
+
     @app.before_serving
     async def init():
         try:
